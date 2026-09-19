@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Arduino Web Serial Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        .glass {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        body { background-color: #0f172a; color: #f8fafc; }
+    </style>
+</head>
+<body class="min-h-screen p-4 md:p-8">
+
+    <!-- Header & Connection Bar -->
+    <header class="max-w-7xl mx-auto mb-8 flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div>
+            <h1 class="text-3xl font-bold text-blue-400">Serial<span class="text-white">GUI</span></h1>
+            <p class="text-slate-400 text-sm">Dynamic Arduino Hardware Interface</p>
+        </div>
+        
+        <div class="glass p-4 rounded-xl flex flex-wrap items-center gap-4">
+            <div class="flex items-center gap-2">
+                <label class="text-xs font-semibold uppercase text-slate-500">Baud</label>
+                <select id="baudrate" class="bg-slate-800 text-white text-sm rounded px-2 py-1 border border-slate-600 outline-none">
+                    <option value="9600" selected>9600</option>
+                    <option value="115200">115200</option>
+                    <option value="57600">57600</option>
+                </select>
+            </div>
+            <button id="btnConnect" class="bg-blue-600 hover:bg-blue-500 transition-colors px-6 py-2 rounded-lg font-medium text-sm flex items-center gap-2">
+                <span id="connIcon" class="w-2 h-2 bg-white rounded-full"></span>
+                Connect Arduino
+            </button>
+            <button id="btnDisconnect" class="hidden bg-red-600 hover:bg-red-500 transition-colors px-6 py-2 rounded-lg font-medium text-sm">
+                Disconnect
+            </button>
+        </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <!-- Dynamic Widgets Grid -->
+        <div id="widgetGrid" class="lg:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-4">
+            <!-- Widgets injected here by JS -->
+            <div id="emptyState" class="col-span-full flex flex-col items-center justify-center p-12 glass rounded-2xl text-slate-500 border-dashed border-2">
+                <svg class="w-12 h-12 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                <p>Waiting for Arduino initialization packets...</p>
+            </div>
+        </div>
+
+        <!-- Console/Log Panel -->
+        <div class="flex flex-col gap-4">
+            <div class="glass rounded-2xl p-4 flex flex-col h-[600px]">
+                <div class="flex justify-between items-center mb-2">
+                    <h2 class="text-sm font-semibold uppercase text-slate-500">Raw Serial Log</h2>
+                    <button id="btnClear" class="text-xs text-slate-400 hover:text-white underline">Clear</button>
+                </div>
+                <div id="console" class="bg-black/50 rounded-lg p-3 font-mono text-xs overflow-y-auto flex-grow text-green-400 space-y-1">
+                    <div>System ready. Please connect device...</div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        /** 
+         * APP STATE 
+         */
+        let port;
+        let reader;
+        let writer;
+        const widgets = {}; // Stores references to DOM and Chart objects
+        const consoleEl = document.getElementById('console');
+        const widgetGrid = document.getElementById('widgetGrid');
+        const emptyState = document.getElementById('emptyState');
+
+        /**
+         * UI HELPERS
+         */
+        function log(msg, type = 'info') {
+            const div = document.createElement('div');
+            const timestamp = new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            div.innerHTML = `<span class="text-slate-600">[${timestamp}]</span> <span class="${type === 'err' ? 'text-red-400' : 'text-green-400'}">${msg}</span>`;
+            consoleEl.appendChild(div);
+            consoleEl.scrollTop = consoleEl.scrollHeight;
+        }
+
+        /**
+         * DYNAMIC WIDGET ENGINE
+         */
+        function createWidget(config) {
+            emptyState.classList.add('hidden');
+            
+            const card = document.createElement('div');
+            card.className = 'glass p-6 rounded-2xl flex flex-col gap-4 transition-all hover:border-blue-500/50';
+            card.id = `widget-${config.id}`;
+
+            const label = document.createElement('label');
+            label.className = 'text-sm font-medium text-slate-300';
+            label.innerText = config.label;
+            card.appendChild(label);
+
+            if (config.kind === 'toggle') {
+                const switchEl = document.createElement('label');
+                switchEl.className = 'relative inline-flex items-center cursor-pointer';
+                switchEl.innerHTML = `
+                    <input type="checkbox" class="sr-only peer" id="input-${config.id}">
+                    <div class="w-11 h-6 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                `;
+                card.appendChild(switchEl);
+                
+                const input = switchEl.querySelector('input');
+                input.addEventListener('change', (e) => {
+                    sendToArduino({ id: config.id, val: e.target.checked ? 1 : 0 });
+                });
+                widgets[config.id] = { type: 'toggle', input: input };
+
+            } else if (config.kind === 'slider') {
+                const slider = document.createElement('input');
+                slider.type = 'range';
+                slider.min = config.min || 0;
+                slider.max = config.max || 1023;
+                slider.className = 'w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500';
+                
+                const valDisp = document.createElement('span');
+                valDisp.className = 'text-right text-xl font-mono font-bold';
+                valDisp.innerText = slider.value;
+
+                card.appendChild(slider);
+                card.appendChild(valDisp);
+
+                slider.addEventListener('input', (e) => {
+                    valDisp.innerText = e.target.value;
+                    sendToArduino({ id: config.id, val: parseInt(e.target.value) });
+                });
+                widgets[config.id] = { type: 'slider', display: valDisp, input: slider };
+
+            } else if (config.kind === 'chart') {
+                const canvas = document.createElement('canvas');
+                canvas.className = 'w-full h-32';
+                card.appendChild(canvas);
+
+                const ctx = canvas.getContext('2d');
+                const chart = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: Array(20).fill(''),
+                        datasets: [{
+                            data: Array(20).fill(null),
+                            borderColor: '#3b82f6',
+                            borderWidth: 2,
+                            pointRadius: 0,
+                            tension: 0.4,
+                            fill: true,
+                            backgroundColor: 'rgba(59, 130, 246, 0.1)'
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: { legend: { display: false } },
+                        scales: { 
+                            x: { display: false }, 
+                            y: { 
+                                min: config.min || 0, 
+                                max: config.max || 1023, 
+                                grid: { color: 'rgba(255,255,255,0.05)' },
+                                ticks: { color: '#64748b', font: { size: 10 } }
+                            } 
+                        },
+                        animation: false
+                    }
+                });
+                widgets[config.id] = { type: 'chart', chart: chart };
+            }
+
+            widgetGrid.appendChild(card);
+            log(`Initialized component: ${config.label} (${config.kind})`);
+        }
+
+        function updateWidget(data) {
+            const widget = widgets[data.id];
+            if (!widget) return;
+
+            if (widget.type === 'toggle') {
+                widget.input.checked = (data.val == 1);
+            } else if (widget.type === 'slider') {
+                widget.input.value = data.val;
+                widget.display.innerText = data.val;
+            } else if (widget.type === 'chart') {
+                const chartData = widget.chart.data.datasets[0].data;
+                chartData.push(data.val);
+                if (chartData.length > 20) chartData.shift();
+                widget.chart.update();
+            }
+        }
+
+        /**
+         * SERIAL COMMUNICATION
+         */
+        async function sendToArduino(obj) {
+            if (writer) {
+                const data = new TextEncoder().encode(JSON.stringify(obj) + '\n');
+                await writer.write(data);
+            }
+        }
+
+        async function connect() {
+            try {
+                port = await navigator.serial.requestPort();
+                const baudRate = parseInt(document.getElementById('baudrate').value);
+                await port.open({ baudRate });
+
+                writer = port.writable.getWriter();
+                
+                const textDecoder = new TextDecoder();
+                let buffer = "";
+
+                document.getElementById('btnConnect').classList.add('hidden');
+                document.getElementById('btnDisconnect').classList.remove('hidden');
+                log("Connected to Arduino successfully.");
+
+                while (port.readable) {
+                    reader = port.readable.getReader();
+                    try {
+                        while (true) {
+                            const { value, done } = await reader.read();
+                            if (done) break;
+                            
+                            buffer += textDecoder.decode(value, { stream: true });
+                            
+                            // Split by newline to handle fragmented packets
+                            let lines = buffer.split('\n');
+                            buffer = lines.pop(); // Keep partial line in buffer
+
+                            for (const line of lines) {
+                                const trimmed = line.trim();
+                                if (!trimmed) continue;
+                                
+                                try {
+                                    const json = JSON.parse(trimmed);
+                                    if (json.type === 'init') {
+                                        createWidget(json);
+                                    } else if (json.type === 'data') {
+                                        updateWidget(json);
+                                    }
+                                } catch (e) {
+                                    log(`Malformed JSON: ${trimmed}`, 'err');
+                                }
+                            }
+                        }
+                    } catch (error) {
+                        log(`Read error: ${error}`, 'err');
+                    } finally {
+                        reader.releaseLock();
+                    }
+                }
+            } catch (err) {
+                log(`Connection Failed: ${err}`, 'err');
+            }
+        }
+
+        async function disconnect() {
+            if (reader) await reader.cancel();
+            if (writer) await writer.releaseLock();
+            if (port) await port.close();
+            
+            document.getElementById('btnConnect').classList.remove('hidden');
+            document.getElementById('btnDisconnect').classList.add('hidden');
+            log("Disconnected from device.");
+        }
+
+        // Event Listeners
+        document.getElementById('btnConnect').addEventListener('click', connect);
+        document.getElementById('btnDisconnect').addEventListener('click', disconnect);
+        document.getElementById('btnClear').addEventListener('click', () => {
+            consoleEl.innerHTML = '';
+            log("Console cleared.");
+        });
+
+    </script>
+</body>
+</html>
